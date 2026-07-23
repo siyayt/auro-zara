@@ -22,8 +22,8 @@ class Config:
         self.SESSION2 = getenv("SESSION2", None)
         self.SESSION3 = getenv("SESSION3", None)
 
-        self.SUPPORT_CHANNEL = getenv("SUPPORT_CHANNEL", "https://t.me/teamAuro")
-        self.SUPPORT_CHAT = getenv("SUPPORT_CHAT", "https://t.me/Aurosupport")
+        self.SUPPORT_CHANNEL = getenv("SUPPORT_CHANNEL", "https://t.me/StylishNameFont")
+        self.SUPPORT_CHAT = getenv("SUPPORT_CHAT", "https://t.me/Hindi_Shayari_Lovers")
 
         self.API_URL = getenv("API_URL", getenv("MusicSp_API_URL", "https://apisparrow.site"))
         self.API_KEY = getenv("API_KEY", getenv("MusicSp_API_KEY", "sparrownhhJUQYo5QvMnred9S2YPcEi")) # Get API Key from @SpYtAPIBot if required
