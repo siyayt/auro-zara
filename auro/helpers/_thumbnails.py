@@ -228,7 +228,7 @@ class Thumbnail:
 
         title = title or "Unknown Title"
         bot_name = app_name or "Bot"
-        powered_text = "Powered by - Team Auro"
+        powered_text = "Powered by - RAJA-BABU"
 
         ok = bool(thumb_url) and await self.download_file(thumb_url, raw_thumb_path)
         if not ok:
