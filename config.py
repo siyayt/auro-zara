@@ -25,8 +25,8 @@ class Config:
         self.SUPPORT_CHANNEL = getenv("SUPPORT_CHANNEL", "https://t.me/StylishNameFont")
         self.SUPPORT_CHAT = getenv("SUPPORT_CHAT", "https://t.me/Hindi_Shayari_Lovers")
 
-        self.API_URL = getenv("API_URL", getenv("MusicSp_API_URL", "https://apisparrow.site"))
-        self.API_KEY = getenv("API_KEY", getenv("MusicSp_API_KEY", "sparrownhhJUQYo5QvMnred9S2YPcEi")) # Get API Key from @SpYtAPIBot if required
+        self.API_URL = getenv("API_URL", getenv("MusicSp_API_URL", "http://api.onegrab.fun"))
+        self.API_KEY = getenv("API_KEY", getenv("MusicSp_API_KEY", "d25f05_Sp_QkEWGkDF5Q8SnY3WXKvUch1P3piul")) # Get API Key from @SpYtAPIBot if required
 
         self.AUTO_LEAVE: bool = getenv("AUTO_LEAVE", "False").lower() == "False"
         self.AUTO_END: bool = getenv("AUTO_END", "False").lower() == "False"
