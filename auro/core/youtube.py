@@ -9,8 +9,7 @@ from pathlib import Path
 from py_yt import Playlist, VideosSearch
 
 from auro import config, logger
-from auro.helpers import FallenApi, Track, utils
-
+from auro.helpers import Track, utils
 
 class YouTube:
     def __init__(self):
