@@ -1,27 +1,27 @@
-import asyncio
 import os
-import random
 import re
+import yt_dlp
+import random
+import asyncio
+import aiohttp
 from pathlib import Path
 
-import aiohttp
 from py_yt import Playlist, VideosSearch
 
-from auro import logger
+from auro import config, logger
 from auro.helpers import FallenApi, Track, utils
-
 
 # Inflex download API. Get a key from @InflexAPIBot on Telegram.
 API_URL = "https://teaminflex.xyz"
 API_KEY = "INFLEX20013628D"
 
-
 class YouTube:
     def __init__(self):
+        self.api = None
         self.base = "https://www.youtube.com/watch?v="
         self.cookies = []
         self.checked = False
-        self.cookie_dir = "VampireMusic/cookies"
+        self.cookie_dir = "auro/cookies"
         self.warned = False
         self.regex = re.compile(
             r"(https?://)?(www\.|m\.|music\.)?"
@@ -33,6 +33,8 @@ class YouTube:
             r"(?!/(watch\?v=[A-Za-z0-9_-]{11}|shorts/[A-Za-z0-9_-]{11}"
             r"|playlist\?list=PL[A-Za-z0-9_-]+|[A-Za-z0-9_-]{11}))\S*"
         )
+        if config.API_URL:
+            self.api = FallenApi(config.API_URL, config.API_KEY)
 
     def get_cookies(self):
         if not self.checked:
@@ -63,11 +65,7 @@ class YouTube:
         return bool(re.match(self.regex, url))
 
     def invalid(self, url: str) -> bool:
-        """True only for a YouTube link that is malformed."""
-        low = (url or "").lower()
-        if "youtube.com" in low or "youtu.be" in low:
-            return bool(re.match(self.iregex, url))
-        return False
+        return bool(re.match(self.iregex, url))
 
     async def search(self, query: str, m_id: int, video: bool = False) -> Track | None:
         try:
@@ -75,7 +73,6 @@ class YouTube:
             results = await _search.next()
         except Exception:
             return None
-
         if results and results["result"]:
             data = results["result"][0]
             return Track(
@@ -91,31 +88,6 @@ class YouTube:
                 video=video,
             )
         return None
-
-    async def search_multi(self, query: str, m_id: int, video: bool = False, limit: int = 5) -> list[Track]:
-        try:
-            _search = VideosSearch(query, limit=limit, with_live=False)
-            results = await _search.next()
-        except Exception:
-            return []
-        tracks = []
-        if results and results["result"]:
-            for data in results["result"]:
-                tracks.append(
-                    Track(
-                        id=data.get("id"),
-                        channel_name=data.get("channel", {}).get("name"),
-                        duration=data.get("duration"),
-                        duration_sec=utils.to_seconds(data.get("duration")),
-                        message_id=m_id,
-                        title=data.get("title")[:25],
-                        thumbnail=data.get("thumbnails", [{}])[-1].get("url").split("?")[0],
-                        url=data.get("link"),
-                        view_count=data.get("viewCount", {}).get("short"),
-                        video=video,
-                    )
-                )
-        return tracks
 
     async def playlist(self, limit: int, user: str, url: str, video: bool) -> list[Track | None]:
         tracks = []
@@ -139,159 +111,115 @@ class YouTube:
             pass
         return tracks
 
-    async def _download_audio(self, video_id: str):
-        logger.info(f"🎵 [AUDIO] Starting download process for ID: {video_id}")
+    async def related(self, video_id: str, limit: int = 10) -> list[dict]:
+        """Fetch related videos using YouTube's auto-generated mix/radio playlist."""
+        def _fetch():
+            cookie = self.get_cookies()
+            opts = {
+                "extract_flat": True,
+                "quiet": True,
+                "no_warnings": True,
+                "skip_download": True,
+                "geo_bypass": True,
+                "nocheckcertificate": True,
+                "cookiefile": cookie,
+                "playlistend": limit,
+            }
+            url = f"{self.base}{video_id}&list=RD{video_id}"
+            try:
+                with yt_dlp.YoutubeDL(opts) as ydl:
+                    info = ydl.extract_info(url, download=False)
+                    return (info or {}).get("entries") or []
+            except Exception as ex:
+                logger.warning("Autoplay: failed to fetch related videos: %s", ex)
+                return []
 
-        path = Path(f"downloads/{video_id}.webm")
-        os.makedirs("downloads", exist_ok=True)
+        return await asyncio.to_thread(_fetch)
 
-        if path.exists():
-            logger.info(f"🎵 [LOCAL] Found existing audio for ID {video_id}")
-            return str(path)
+    async def autoplay_track(
+        self, video_id: str, video: bool = False, exclude: set[str] = None
+    ) -> Track | None:
+        """Pick the next unplayed related video and return it as a Track."""
+        exclude = exclude or set()
+        entries = await self.related(video_id)
+        for entry in entries:
+            if not entry:
+                continue
+            entry_id = entry.get("id")
+            if not entry_id or entry_id == video_id or entry_id in exclude:
+                continue
 
-        payload = {"url": video_id, "type": "audio"}
-        headers = {
-            "Content-Type": "application/json",
-            "X-API-KEY": API_KEY,
+            duration_sec = int(entry.get("duration") or 0)
+            thumbs = entry.get("thumbnails") or []
+            thumbnail = (
+                thumbs[-1].get("url").split("?")[0]
+                if thumbs and thumbs[-1].get("url")
+                else f"https://i.ytimg.com/vi/{entry_id}/hqdefault.jpg"
+            )
+            return Track(
+                id=entry_id,
+                channel_name=entry.get("channel") or entry.get("uploader"),
+                duration=utils.format_duration(duration_sec),
+                duration_sec=duration_sec,
+                title=(entry.get("title") or "Unknown")[:25],
+                thumbnail=thumbnail,
+                url=self.base + entry_id,
+                user="Autoplay",
+                view_count="",
+                video=video,
+            )
+        return None
+
+    async def download(self, video_id: str, video: bool = False) -> str | None:
+        ext = "mp4" if video else "mp3"
+        filename = f"downloads/{video_id}.{ext}"
+
+        if Path(filename).exists():
+            return filename
+
+        if self.api and self.api.api_url:
+            download_type = "video" if video else "audio"
+            url = f"{self.api.api_url.rstrip('/')}/download?url={video_id}&type={download_type}"
+            if self.api.api_key:
+                url += f"&api_key={self.api.api_key}"
+            return url
+
+        cookie = self.get_cookies()
+        base_opts = {
+            "outtmpl": "downloads/%(id)s.%(ext)s",
+            "quiet": True,
+            "noplaylist": True,
+            "geo_bypass": True,
+            "no_warnings": True,
+            "overwrites": False,
+            "nocheckcertificate": True,
+            "cookiefile": cookie,
+            "concurrent_fragment_downloads": 4,
+            "buffersize": 1024 * 1024,
+            "extractor_args": {"youtube": {"player_client": ["android", "web"]}},
         }
 
-        async with aiohttp.ClientSession() as session:
-            try:
-                async with session.post(
-                    f"{API_URL}/download",
-                    json=payload,
-                    headers=headers,
-                ) as response:
-                    data = await response.json(content_type=None)
-
-                if data and data.get("status") == "error":
-                    logger.error(f"[AUDIO] API ERROR → {data}")
-                    return None
-
-                retries = 10
-
-                if not data or not data.get("download_url"):
-                    logger.warning("[AUDIO] File not ready / JSON missing → retrying...")
-
-                    for i in range(retries):
-                        await asyncio.sleep(8)
-
-                        async with session.post(
-                            f"{API_URL}/download",
-                            json=payload,
-                            headers=headers,
-                        ) as response:
-                            data = await response.json(content_type=None)
-
-                        if data and data.get("status") == "error":
-                            logger.error(f"[AUDIO] API ERROR during retry → {data}")
-                            return None
-
-                        if data and data.get("status") == "success" and data.get("download_url"):
-                            logger.info(f"[AUDIO] Got URL after retry #{i+1}")
-                            break
-
-                        logger.warning(f"[AUDIO] Retry {i+1}/{retries} → still not ready")
-
-                if not data or not data.get("download_url"):
-                    logger.error(f"[AUDIO] FAILED after all retries → {data}")
-                    return None
-
-                download_link = API_URL + data["download_url"]
-
-                async with session.get(download_link) as file_response:
-                    if file_response.status != 200:
-                        logger.error(f"[AUDIO] Download failed → {file_response.status}")
-                        return None
-
-                    with open(path, "wb") as f:
-                        async for chunk in file_response.content.iter_chunked(8192):
-                            f.write(chunk)
-
-                logger.info(f"🎵 [API] Audio download completed for {video_id}")
-                return str(path)
-
-            except Exception as e:
-                logger.error(f"[AUDIO] Exception: {e}")
-                return None
-
-    async def _download_video(self, video_id: str):
-        logger.info(f"🎥 [VIDEO] Starting download process for ID: {video_id}")
-
-        path = Path(f"downloads/{video_id}.mkv")
-        os.makedirs("downloads", exist_ok=True)
-
-        if path.exists():
-            logger.info(f"🎥 [LOCAL] Found existing video for ID {video_id}")
-            return str(path)
-
-        payload = {"url": video_id, "type": "video"}
-        headers = {
-            "Content-Type": "application/json",
-            "X-API-KEY": API_KEY,
-        }
-
-        async with aiohttp.ClientSession() as session:
-            try:
-                async with session.post(
-                    f"{API_URL}/download",
-                    json=payload,
-                    headers=headers,
-                ) as response:
-                    data = await response.json(content_type=None)
-
-                if data and data.get("status") == "error":
-                    logger.error(f"[VIDEO] API ERROR → {data}")
-                    return None
-
-                retries = 20
-
-                if not data or not data.get("download_url"):
-                    logger.warning("[VIDEO] File not ready / JSON missing → retrying...")
-
-                    for i in range(retries):
-                        await asyncio.sleep(20)
-
-                        async with session.post(
-                            f"{API_URL}/download",
-                            json=payload,
-                            headers=headers,
-                        ) as response:
-                            data = await response.json(content_type=None)
-
-                        if data and data.get("status") == "error":
-                            logger.error(f"[VIDEO] API ERROR during retry → {data}")
-                            return None
-
-                        if data and data.get("status") == "success" and data.get("download_url"):
-                            logger.info(f"[VIDEO] Got URL after retry #{i+1}")
-                            break
-
-                        logger.warning(f"[VIDEO] Retry {i+1}/{retries} → still not ready")
-
-                if not data or not data.get("download_url"):
-                    logger.error(f"[VIDEO] FAILED after all retries → {data}")
-                    return None
-
-                download_link = API_URL + data["download_url"]
-
-                async with session.get(download_link) as file_response:
-                    if file_response.status != 200:
-                        logger.error(f"[VIDEO] Download failed → {file_response.status}")
-                        return None
-
-                    with open(path, "wb") as f:
-                        async for chunk in file_response.content.iter_chunked(8192):
-                            f.write(chunk)
-
-                logger.info(f"🎥 [API] Video download completed for {video_id}")
-                return str(path)
-
-            except Exception as e:
-                logger.error(f"[VIDEO] Exception: {e}")
-                return None
-
-    async def download(self, video_id: str, video: bool = False):
         if video:
-            return await self._download_video(video_id)
-        return await self._download_audio(video_id)
+            ydl_opts = {
+                **base_opts,
+                "format": "(bestvideo[height<=?720][width<=?1280][ext=mp4])+(bestaudio)",
+                "merge_output_format": "mp4",
+            }
+        else:
+            ydl_opts = {
+                **base_opts,
+                "format": "bestaudio[ext=webm][acodec=opus]/bestaudio/best",
+            }
+
+        def _download():
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                try:
+                    ydl.download([self.base + video_id])
+                except (yt_dlp.utils.DownloadError, yt_dlp.utils.ExtractorError):
+                    return None
+                except Exception as ex:
+                    logger.warning("Download failed: %s", ex)
+                    return None
+            return filename
+
+        return await asyncio.to_thread(_download)
