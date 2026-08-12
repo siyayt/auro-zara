@@ -14,7 +14,8 @@ import yt_dlp
 from py_yt import Playlist, VideosSearch
 
 from auro import config, logger
-from anony.helpers import cache, Track, utils
+from auro.helpers import Track, utils
+
 
 
 class YouTube:
