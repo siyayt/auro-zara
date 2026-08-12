@@ -13,8 +13,8 @@ import aiohttp
 import yt_dlp
 from py_yt import Playlist, VideosSearch
 
-from anony import config, logger
-from anony.helpers import cache, Track, utils
+from auro import config, logger
+from auro.helpers import cache, Track, utils
 from ._api import FallenApi
 
 
