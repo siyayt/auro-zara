@@ -7,10 +7,22 @@ import aiohttp
 from pathlib import Path
 
 from py_yt import Playlist, VideosSearch
+ 
+# Use environment variables for configuration
+API_URL = os.getenv("API_URL", "https://web.riteshyt.in").rstrip("/")
+API_KEY = os.getenv("API_KEY", "")
 
- # Inflex download API. Get a key from @InflexAPIBot on Telegram.
-API_URL = "https://teaminflex.xyz"
-API_KEY = "INFLEX20013628D"
+
+async def download_assistant(query: str, dl_type: str) -> str:
+    """Helper to get stream URL from the API"""
+    safe_query = urllib.parse.quote(query)
+    ext = "mp3" if dl_type == "audio" else "mp4"
+    if API_KEY:
+        # Use query_masked path to satisfy bots that look for direct file extensions
+        url = f"{API_URL}/downloads/{API_KEY}/{safe_query}.{ext}"
+    else:
+        url = f"{API_URL}/downloads/stream?query={safe_query}&dl_type={dl_type}"
+    return url
 
 
 class YouTube:
@@ -18,8 +30,9 @@ class YouTube:
         self.base = "https://www.youtube.com/watch?v="
         self.cookies = []
         self.checked = False
-        self.cookie_dir = "VampireMusic/cookies"
+        self.cookie_dir = "KartikMusic/cookies"
         self.warned = False
+        self._recent_prefetches = {}  # vidid -> timestamp
         self.regex = re.compile(
             r"(https?://)?(www\.|m\.|music\.)?"
             r"(youtube\.com/(watch\?v=|shorts/|playlist\?list=)|youtu\.be/)"
@@ -30,6 +43,14 @@ class YouTube:
             r"(?!/(watch\?v=[A-Za-z0-9_-]{11}|shorts/[A-Za-z0-9_-]{11}"
             r"|playlist\?list=PL[A-Za-z0-9_-]+|[A-Za-z0-9_-]{11}))\S*"
         )
+        self._client = None
+
+    async def get_client(self):
+        if self._client is None or self._client.closed:
+            self._client = aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=600.0, connect=10.0)
+            )
+        return self._client
 
     def get_cookies(self):
         if not self.checked:
@@ -60,61 +81,107 @@ class YouTube:
         return bool(re.match(self.regex, url))
 
     def invalid(self, url: str) -> bool:
-        """True only for a YouTube link that is malformed."""
-        low = (url or "").lower()
-        if "youtube.com" in low or "youtu.be" in low:
-            return bool(re.match(self.iregex, url))
-        return False
+        return bool(re.match(self.iregex, url))
+
+    def _clean_link(self, link: str):
+        if not link:
+            return ""
+        link = str(link)
+        if "&" in link:
+            link = link.split("&")[0]
+        if "?si=" in link:
+            link = link.split("?si=")[0]
+        elif "&si=" in link:
+            link = link.split("&si=")[0]
+        return link
 
     async def search(self, query: str, m_id: int, video: bool = False) -> Track | None:
+        client = await self.get_client()
+        params = {"query": query, "limit": 1}
+        if API_KEY:
+            params["api_key"] = API_KEY
+        try:
+            async with client.get(f"{API_URL}/search", params=params) as response:
+                if response.status == 200:
+                    result_data = await response.json()
+                    result = result_data.get("result")
+                    if result:
+                        data = result[0]
+                        return Track(
+                            id=data.get("id"),
+                            channel_name=data.get("channel", {}).get("name"),
+                            duration=data.get("duration"),
+                            duration_sec=utils.to_seconds(data.get("duration")),
+                            message_id=m_id,
+                            title=data.get("title")[:25],
+                            thumbnail=data.get("thumbnails", [{}])[-1]
+                            .get("url")
+                            .split("?")[0],
+                            url=data.get("link"),
+                            view_count=data.get("viewCount", {}).get("short"),
+                            video=video,
+                        )
+        except Exception as e:
+            logger.error(f"Error in search from API: {e}")
+
+        # Fallback to existing search if API fails
         try:
             _search = VideosSearch(query, limit=1, with_live=False)
             results = await _search.next()
+            if results and results["result"]:
+                data = results["result"][0]
+                return Track(
+                    id=data.get("id"),
+                    channel_name=data.get("channel", {}).get("name"),
+                    duration=data.get("duration"),
+                    duration_sec=utils.to_seconds(data.get("duration")),
+                    message_id=m_id,
+                    title=data.get("title")[:25],
+                    thumbnail=data.get("thumbnails", [{}])[-1].get("url").split("?")[0],
+                    url=data.get("link"),
+                    view_count=data.get("viewCount", {}).get("short"),
+                    video=video,
+                )
         except Exception:
-            return None
-
-        if results and results["result"]:
-            data = results["result"][0]
-            return Track(
-                id=data.get("id"),
-                channel_name=data.get("channel", {}).get("name"),
-                duration=data.get("duration"),
-                duration_sec=utils.to_seconds(data.get("duration")),
-                message_id=m_id,
-                title=data.get("title")[:25],
-                thumbnail=data.get("thumbnails", [{}])[-1].get("url").split("?")[0],
-                url=data.get("link"),
-                view_count=data.get("viewCount", {}).get("short"),
-                video=video,
-            )
+            pass
         return None
 
-    async def search_multi(self, query: str, m_id: int, video: bool = False, limit: int = 5) -> list[Track]:
+    async def playlist(
+        self, limit: int, user: str, url: str, video: bool
+    ) -> list[Track | None]:
+        url = self._clean_link(url)
+        client = await self.get_client()
+        params = {"link": url, "limit": limit}
+        if API_KEY:
+            params["api_key"] = API_KEY
         try:
-            _search = VideosSearch(query, limit=limit, with_live=False)
-            results = await _search.next()
-        except Exception:
-            return []
-        tracks = []
-        if results and results["result"]:
-            for data in results["result"]:
-                tracks.append(
-                    Track(
-                        id=data.get("id"),
-                        channel_name=data.get("channel", {}).get("name"),
-                        duration=data.get("duration"),
-                        duration_sec=utils.to_seconds(data.get("duration")),
-                        message_id=m_id,
-                        title=data.get("title")[:25],
-                        thumbnail=data.get("thumbnails", [{}])[-1].get("url").split("?")[0],
-                        url=data.get("link"),
-                        view_count=data.get("viewCount", {}).get("short"),
-                        video=video,
-                    )
-                )
-        return tracks
+            async with client.get(f"{API_URL}/playlist", params=params) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    videos = data.get("videos")
+                    if videos:
+                        tracks = []
+                        for data in videos:
+                            track = Track(
+                                id=data.get("id"),
+                                channel_name=data.get("channel", {}).get("name", ""),
+                                duration=data.get("duration"),
+                                duration_sec=utils.to_seconds(data.get("duration")),
+                                title=data.get("title")[:25],
+                                thumbnail=data.get("thumbnails")[-1]
+                                .get("url")
+                                .split("?")[0],
+                                url=data.get("link").split("&list=")[0],
+                                user=user,
+                                view_count="",
+                                video=video,
+                            )
+                            tracks.append(track)
+                        return tracks
+        except Exception as e:
+            logger.error(f"Error fetching playlist from API: {e}")
 
-    async def playlist(self, limit: int, user: str, url: str, video: bool) -> list[Track | None]:
+        # Fallback
         tracks = []
         try:
             plist = await Playlist.get(url)
@@ -136,160 +203,113 @@ class YouTube:
             pass
         return tracks
 
-    async def _download_audio(self, video_id: str):
-        logger.info(f"🎵 [AUDIO] Starting download process for ID: {video_id}")
+    async def prefetch(self, link: str, video: bool = False):
+        """Triggers background pre-fetching on the API"""
+        dl_type = "video" if video else "audio"
+        link = self._clean_link(link)
 
-        path = Path(f"downloads/{video_id}.webm")
-        os.makedirs("downloads", exist_ok=True)
+        # Avoid redundant prefetches within 30 seconds
+        import time
 
-        if path.exists():
-            logger.info(f"🎵 [LOCAL] Found existing audio for ID {video_id}")
-            return str(path)
+        now = time.time()
+        regex = r"(?:youtube\.com\/(?:[^\/]+\/.+\/|(?:v|e(?:mbed)?)\/|.*[?&]v=)|youtu\.be\/)([^\"&?\/\s]{11})"
+        match = re.search(regex, link)
+        vidid = match.group(1) if match else link
 
-        payload = {"url": video_id, "type": "audio"}
-        headers = {
-            "Content-Type": "application/json",
-            "X-API-KEY": API_KEY,
-        }
+        cache_key = f"{vidid}_{dl_type}"
+        if cache_key in self._recent_prefetches:
+            if now - self._recent_prefetches[cache_key] < 30:
+                return True
 
-        async with aiohttp.ClientSession() as session:
-            try:
-                async with session.post(
-                    f"{API_URL}/download",
-                    json=payload,
-                    headers=headers,
-                ) as response:
-                    data = await response.json(content_type=None)
+        self._recent_prefetches[cache_key] = now
 
-                if data and data.get("status") == "error":
-                    logger.error(f"[AUDIO] API ERROR → {data}")
-                    return None
+        # Cleanup old prefetches (keep cache small)
+        if len(self._recent_prefetches) > 100:
+            self._recent_prefetches = {
+                k: v for k, v in self._recent_prefetches.items() if now - v < 300
+            }
 
-                retries = 10
+        client = await self.get_client()
+        params = {"query": link, "dl_type": dl_type, "prefetch": "true"}
+        if API_KEY:
+            params["api_key"] = API_KEY
+        try:
+            # Fire and forget request to the API
+            async with client.get(f"{API_URL}/download", params=params):
+                return True
+        except Exception as e:
+            logger.error(f"Prefetch failed for {link}: {e}")
+        return False
 
-                if not data or not data.get("download_url"):
-                    logger.warning("[AUDIO] File not ready / JSON missing → retrying...")
-
-                    for i in range(retries):
-                        await asyncio.sleep(8)
-
-                        async with session.post(
-                            f"{API_URL}/download",
-                            json=payload,
-                            headers=headers,
-                        ) as response:
-                            data = await response.json(content_type=None)
-
-                        if data and data.get("status") == "error":
-                            logger.error(f"[AUDIO] API ERROR during retry → {data}")
-                            return None
-
-                        if data and data.get("status") == "success" and data.get("download_url"):
-                            logger.info(f"[AUDIO] Got URL after retry #{i+1}")
-                            break
-
-                        logger.warning(f"[AUDIO] Retry {i+1}/{retries} → still not ready")
-
-                if not data or not data.get("download_url"):
-                    logger.error(f"[AUDIO] FAILED after all retries → {data}")
-                    return None
-
-                download_link = API_URL + data["download_url"]
-
-                async with session.get(download_link) as file_response:
-                    if file_response.status != 200:
-                        logger.error(f"[AUDIO] Download failed → {file_response.status}")
-                        return None
-
-                    with open(path, "wb") as f:
-                        async for chunk in file_response.content.iter_chunked(8192):
-                            f.write(chunk)
-
-                logger.info(f"🎵 [API] Audio download completed for {video_id}")
-                return str(path)
-
-            except Exception as e:
-                logger.error(f"[AUDIO] Exception: {e}")
+    async def get_related(
+        self, video_id: str, video: bool = False, max_duration: int = 0
+    ) -> Track | None:
+        try:
+            _results = await Recommendations.getRelated(video_id)
+            if not isinstance(_results, dict):
                 return None
+            results = _results.get("result")
+            if results:
+                # Filter for only video types and pick a random one
+                videos = [r for r in results if r.get("type") == "video"]
 
-    async def _download_video(self, video_id: str):
-        logger.info(f"🎥 [VIDEO] Starting download process for ID: {video_id}")
+                if max_duration:
+                    videos = [
+                        v
+                        for v in videos
+                        if utils.to_seconds(v.get("duration") or "00:00")
+                        <= max_duration
+                    ]
 
-        path = Path(f"downloads/{video_id}.mkv")
-        os.makedirs("downloads", exist_ok=True)
-
-        if path.exists():
-            logger.info(f"🎥 [LOCAL] Found existing video for ID {video_id}")
-            return str(path)
-
-        payload = {"url": video_id, "type": "video"}
-        headers = {
-            "Content-Type": "application/json",
-            "X-API-KEY": API_KEY,
-        }
-
-        async with aiohttp.ClientSession() as session:
-            try:
-                async with session.post(
-                    f"{API_URL}/download",
-                    json=payload,
-                    headers=headers,
-                ) as response:
-                    data = await response.json(content_type=None)
-
-                if data and data.get("status") == "error":
-                    logger.error(f"[VIDEO] API ERROR → {data}")
+                if not videos:
                     return None
+                data = random.choice(videos)
+                return Track(
+                    id=data.get("id"),
+                    channel_name=data.get("channel", {}).get("name"),
+                    duration=data.get("duration"),
+                    duration_sec=utils.to_seconds(data.get("duration") or "00:00"),
+                    title=data.get("title")[:25],
+                    thumbnail=data.get("thumbnails", [{}])[-1].get("url").split("?")[0],
+                    url=data.get("link"),
+                    user="Autoplay",
+                    video=video,
+                )
+        except Exception as e:
+            logger.error(f"Error fetching related videos: {e}")
+        return None
 
-                retries = 20
+    async def download(self, video_id: str, video: bool = False) -> str | None:
+        url = self.base + video_id
+        dl_type = "video" if video else "audio"
 
-                if not data or not data.get("download_url"):
-                    logger.warning("[VIDEO] File not ready / JSON missing → retrying...")
+        # Immediate prefetch
+        asyncio.create_task(self.prefetch(url, video=video))
 
-                    for i in range(retries):
-                        await asyncio.sleep(20)
+        if API_KEY:
+            # Using the optimized stream URL from the API
+            stream_url = f"{API_URL}/downloads/{API_KEY}/youtube.com/{video_id}.{'mp4' if video else 'mp3'}"
+        else:
+            # If no API_KEY or custom logic fails, use download_assistant or fallback
+            stream_url = await download_assistant(url, dl_type)
 
-                        async with session.post(
-                            f"{API_URL}/download",
-                            json=payload,
-                            headers=headers,
-                        ) as response:
-                            data = await response.json(content_type=None)
+        # Wait for the stream to be ready and buffering by reading the first 1024 bytes
+        try:
+            client = await self.get_client()
+            async with client.get(stream_url, timeout=30) as resp:
+                if resp.status in [200, 206]:
+                    await resp.content.read(1024)
+                else:
+                    logger.warning(
+                        f"Download stream URL returned status {resp.status} for {video_id}"
+                    )
+        except Exception as e:
+            logger.warning(
+                f"Error checking download stream readiness for {video_id}: {e}"
+            )
 
-                        if data and data.get("status") == "error":
-                            logger.error(f"[VIDEO] API ERROR during retry → {data}")
-                            return None
+        return stream_url
 
-                        if data and data.get("status") == "success" and data.get("download_url"):
-                            logger.info(f"[VIDEO] Got URL after retry #{i+1}")
-                            break
-
-                        logger.warning(f"[VIDEO] Retry {i+1}/{retries} → still not ready")
-
-                if not data or not data.get("download_url"):
-                    logger.error(f"[VIDEO] FAILED after all retries → {data}")
-                    return None
-
-                download_link = API_URL + data["download_url"]
-
-                async with session.get(download_link) as file_response:
-                    if file_response.status != 200:
-                        logger.error(f"[VIDEO] Download failed → {file_response.status}")
-                        return None
-
-                    with open(path, "wb") as f:
-                        async for chunk in file_response.content.iter_chunked(8192):
-                            f.write(chunk)
-
-                logger.info(f"🎥 [API] Video download completed for {video_id}")
-                return str(path)
-
-            except Exception as e:
-                logger.error(f"[VIDEO] Exception: {e}")
-                return None
-
-    async def download(self, video_id: str, video: bool = False):
-        if video:
-            return await self._download_video(video_id)
-        return await self._download_audio(video_id)           
-            
+    async def close(self):
+        if self._client and not self._client.closed:
+            await self._client.close()           
