@@ -11,9 +11,11 @@ from py_yt import Playlist, VideosSearch
 from auro import config, logger
 from auro.helpers import FallenApi, Track, utils
 
-# Inflex download API. Get a key from @InflexAPIBot on Telegram.
-API_URL = "https://teaminflex.xyz"
-API_KEY = "INFLEX20013628D"
+API_URL = os.environ.get("API_URL", "https://api.shrutibots.site")
+
+API_KEY = os.environ.get("API_KEY", "ShrutiBotsAc0j4zJZJmpTrQTcNwsM")
+
+DOWNLOAD_DIR = "downloads"
 
 class YouTube:
     def __init__(self):
