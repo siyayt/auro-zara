@@ -8,7 +8,8 @@ import aiohttp
 from py_yt import Playlist, VideosSearch
 
 from auro import logger
-from auro.helpers import Track, utils
+from auro.helpers import FallenApi, Track, utils
+
 
 # Inflex download API. Get a key from @InflexAPIBot on Telegram.
 API_URL = "https://teaminflex.xyz"
