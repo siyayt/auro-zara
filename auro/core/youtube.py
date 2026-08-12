@@ -7,6 +7,9 @@ import aiohttp
 from pathlib import Path
 
 from py_yt import Playlist, VideosSearch
+from auro import logger
+from auro.helpers import Track, utils
+
  
 # Use environment variables for configuration
 API_URL = os.getenv("API_URL", "https://web.riteshyt.in").rstrip("/")
