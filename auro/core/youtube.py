@@ -1,8 +1,3 @@
-# Copyright (c) 2025 AnonymousX1025
-# Licensed under the MIT License.
-# This file is part of AnonXMusic
-
-
 import os
 import re
 import yt_dlp
@@ -14,24 +9,29 @@ from pathlib import Path
 from py_yt import Playlist, VideosSearch
 
 from auro import config, logger
-from auro.helpers import Track, utils
-import FallenApi
-
+from auro.helpers import FallenApi, Track, utils
 
 
 class YouTube:
     def __init__(self):
+        self.api = None
         self.base = "https://www.youtube.com/watch?v="
         self.cookies = []
         self.checked = False
-        self.cookie_dir = "anony/cookies"
-        self.fallen = FallenApi()
+        self.cookie_dir = "auro/cookies"
         self.warned = False
         self.regex = re.compile(
             r"(https?://)?(www\.|m\.|music\.)?"
             r"(youtube\.com/(watch\?v=|shorts/|playlist\?list=)|youtu\.be/)"
             r"([A-Za-z0-9_-]{11}|PL[A-Za-z0-9_-]+)([&?][^\s]*)?"
         )
+        self.iregex = re.compile(
+            r"https?://(?:www\.|m\.|music\.)?(?:youtube\.com|youtu\.be)"
+            r"(?!/(watch\?v=[A-Za-z0-9_-]{11}|shorts/[A-Za-z0-9_-]{11}"
+            r"|playlist\?list=PL[A-Za-z0-9_-]+|[A-Za-z0-9_-]{11}))\S*"
+        )
+        if config.API_URL:
+            self.api = FallenApi(config.API_URL, config.API_KEY)
 
     def get_cookies(self):
         if not self.checked:
@@ -61,6 +61,9 @@ class YouTube:
     def valid(self, url: str) -> bool:
         return bool(re.match(self.regex, url))
 
+    def invalid(self, url: str) -> bool:
+        return bool(re.match(self.iregex, url))
+
     async def search(self, query: str, m_id: int, video: bool = False) -> Track | None:
         try:
             _search = VideosSearch(query, limit=1, with_live=False)
@@ -82,30 +85,6 @@ class YouTube:
                 video=video,
             )
         return None
-
-    async def get_next(self, id: str) -> Track | None:
-        url = f"{self.base}{id}&list=RD{id}"
-        try:
-            _result = await Playlist.get(url)
-            if not _result or not _result.get("videos"):
-                return None
-            videos = _result.get("videos")
-            random.shuffle(videos)
-            data = videos[0]
-            track = Track(
-                id=data.get("id"),
-                channel_name=data.get("channel", {}).get("name", ""),
-                duration=data.get("duration"),
-                duration_sec=utils.to_seconds(data.get("duration")),
-                title=data.get("title")[:25],
-                thumbnail=data.get("thumbnails")[-1].get("url").split("?")[0],
-                url=data.get("link"),
-                view_count="",
-                video=False,
-            )
-            return track
-        except Exception:
-            return None
 
     async def playlist(self, limit: int, user: str, url: str, video: bool) -> list[Track | None]:
         tracks = []
@@ -129,21 +108,78 @@ class YouTube:
             pass
         return tracks
 
+    async def related(self, video_id: str, limit: int = 10) -> list[dict]:
+        """Fetch related videos using YouTube's auto-generated mix/radio playlist."""
+        def _fetch():
+            cookie = self.get_cookies()
+            opts = {
+                "extract_flat": True,
+                "quiet": True,
+                "no_warnings": True,
+                "skip_download": True,
+                "geo_bypass": True,
+                "nocheckcertificate": True,
+                "cookiefile": cookie,
+                "playlistend": limit,
+            }
+            url = f"{self.base}{video_id}&list=RD{video_id}"
+            try:
+                with yt_dlp.YoutubeDL(opts) as ydl:
+                    info = ydl.extract_info(url, download=False)
+                    return (info or {}).get("entries") or []
+            except Exception as ex:
+                logger.warning("Autoplay: failed to fetch related videos: %s", ex)
+                return []
+
+        return await asyncio.to_thread(_fetch)
+
+    async def autoplay_track(
+        self, video_id: str, video: bool = False, exclude: set[str] = None
+    ) -> Track | None:
+        """Pick the next unplayed related video and return it as a Track."""
+        exclude = exclude or set()
+        entries = await self.related(video_id)
+        for entry in entries:
+            if not entry:
+                continue
+            entry_id = entry.get("id")
+            if not entry_id or entry_id == video_id or entry_id in exclude:
+                continue
+
+            duration_sec = int(entry.get("duration") or 0)
+            thumbs = entry.get("thumbnails") or []
+            thumbnail = (
+                thumbs[-1].get("url").split("?")[0]
+                if thumbs and thumbs[-1].get("url")
+                else f"https://i.ytimg.com/vi/{entry_id}/hqdefault.jpg"
+            )
+            return Track(
+                id=entry_id,
+                channel_name=entry.get("channel") or entry.get("uploader"),
+                duration=utils.format_duration(duration_sec),
+                duration_sec=duration_sec,
+                title=(entry.get("title") or "Unknown")[:25],
+                thumbnail=thumbnail,
+                url=self.base + entry_id,
+                user="Autoplay",
+                view_count="",
+                video=video,
+            )
+        return None
+
     async def download(self, video_id: str, video: bool = False) -> str | None:
-        if cached := await cache.fetch_song(video_id):
-            return cached
-
-        url = self.base + video_id
-        if not video and config.API_KEY and config.API_URL:
-            if file_path := await self.fallen.download_track(video_id, url):
-                await cache.handle_dl(file_path, video_id)
-                return file_path
-
-        ext = "mp4" if video else "webm"
+        ext = "mp4" if video else "mp3"
         filename = f"downloads/{video_id}.{ext}"
 
         if Path(filename).exists():
             return filename
+
+        if self.api and self.api.api_url:
+            download_type = "video" if video else "audio"
+            url = f"{self.api.api_url.rstrip('/')}/download?url={video_id}&type={download_type}"
+            if self.api.api_key:
+                url += f"&api_key={self.api.api_key}"
+            return url
 
         cookie = self.get_cookies()
         base_opts = {
@@ -155,6 +191,9 @@ class YouTube:
             "overwrites": False,
             "nocheckcertificate": True,
             "cookiefile": cookie,
+            "concurrent_fragment_downloads": 4,
+            "buffersize": 1024 * 1024,
+            "extractor_args": {"youtube": {"player_client": ["android", "web"]}},
         }
 
         if video:
@@ -166,24 +205,18 @@ class YouTube:
         else:
             ydl_opts = {
                 **base_opts,
-                "format": "bestaudio[ext=webm][acodec=opus]",
+                "format": "bestaudio[ext=webm][acodec=opus]/bestaudio/best",
             }
 
         def _download():
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 try:
-                    ydl.download([url])
+                    ydl.download([self.base + video_id])
                 except (yt_dlp.utils.DownloadError, yt_dlp.utils.ExtractorError):
-                    if cookie: self.cookies.remove(cookie)
                     return None
                 except Exception as ex:
                     logger.warning("Download failed: %s", ex)
                     return None
             return filename
 
-        await asyncio.to_thread(_download)
-        try:
-            await cache.handle_dl(filename, video_id)
-        except Exception:
-            pass
-        return filename
+        return await asyncio.to_thread(_download)
