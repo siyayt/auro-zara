@@ -15,7 +15,6 @@ from py_yt import Playlist, VideosSearch
 
 from auro import config, logger
 from auro.helpers import Track, utils
-from ._api import FallenApi
 
 
 
