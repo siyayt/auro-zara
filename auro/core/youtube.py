@@ -12,20 +12,11 @@ from auro.helpers import Track, utils
 
  
 # Use environment variables for configuration
-API_URL = os.getenv("API_URL", "https://web.riteshyt.in").rstrip("/")
-API_KEY = os.getenv("API_KEY", "")
+API_URL = os.environ.get("API_URL", "https://api.shrutibots.site")
 
+API_KEY = os.environ.get("API_KEY", "ShrutiBots976qlJNl2ikf8j7bvBo1")
 
-async def download_assistant(query: str, dl_type: str) -> str:
-    """Helper to get stream URL from the API"""
-    safe_query = urllib.parse.quote(query)
-    ext = "mp3" if dl_type == "audio" else "mp4"
-    if API_KEY:
-        # Use query_masked path to satisfy bots that look for direct file extensions
-        url = f"{API_URL}/downloads/{API_KEY}/{safe_query}.{ext}"
-    else:
-        url = f"{API_URL}/downloads/stream?query={safe_query}&dl_type={dl_type}"
-    return url
+DOWNLOAD_DIR = "downloads"
 
 
 class YouTube:
